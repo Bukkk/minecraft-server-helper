@@ -1,127 +1,143 @@
-import http.client
-import json
-import argparse
+from http.client import HTTPSConnection
+from json import loads as parse_json
+from datetime import datetime, timedelta, timezone
 
-# polaczenie z serwerem
-def download_remote_text_file(host: str, url: str):
-    version_provider_connection = http.client.HTTPSConnection(host)
-    version_provider_connection.request('GET', url)
-    response_payload = version_provider_connection.getresponse().read()
-    
-    version_provider_connection.close()
+# connection layer
+def https_get_to_host(host: str, remote_path: str):
+    https_connection = HTTPSConnection(host)    
+    https_connection.request('GET', remote_path)
+
+    response_payload = https_connection.getresponse().read()    
+    https_connection.close()
+
     return response_payload
 
-def download_remote_text_file_from_url(full_url: str):
+def https_get_to_url(full_url: str):
     from urllib.parse import urlparse
     parsed_url = urlparse(full_url)
 
-    return download_remote_text_file(parsed_url.netloc, parsed_url.path)
+    return https_get_to_host(parsed_url.netloc, parsed_url.path)
 
-def download_version_manifest():
-    return download_remote_text_file('launchermeta.mojang.com', '/mc/game/version_manifest.json')
+# download layer
+def fetch_version_manifest(version_manifest_url):
+    return parse_json(https_get_to_url(version_manifest_url))
 
-def json_version_manifest():
-    return json.loads(download_version_manifest())
+def fetch_detailed_version_manifest(detailed_version_manifest_url):
+    return parse_json(https_get_to_url(detailed_version_manifest_url))
 
-def download_detailed_version_manifest(detailed_version_manifest_url):
-    return download_remote_text_file_from_url(detailed_version_manifest_url)
+# abstraction layer
+class VersionInfo:
+    "abstraction of api at launchermeta.mojang.com"
 
-def json_detailed_version_manifest(detailed_version_manifest_url):
-    return json.loads(download_detailed_version_manifest(detailed_version_manifest_url))
+    def __init__(self):
+        self.version_manifest = fetch_version_manifest('https://launchermeta.mojang.com/mc/game/version_manifest.json')
 
-# uzytecznosci parsujace
-def parse_latest_version_name(version_manifest):
-    return version_manifest['latest']
+    def all_version_names(self):
+        "list - version names newer first"
 
-def parse_latest_release_version_name(version_manifest):
-    return parse_latest_version_name(version_manifest)['release']
+        return [index['id'] for index in self.version_manifest['versions']]
 
-def parse_all_versions_info(version_manifest):
-    return version_manifest['versions']
+    def latest_release_name(self):
+        return self.version_manifest['latest']['release']
+    
+    def latest_snapshot_name(self):
+        return self.version_manifest['latest']['snapshot']
 
-def parse_version_info(version_manifest, version_name):
-    # print('version: {}, infoid: {} '.format(version_name, version_manifest['versions'][0]['id']))
-    version_info = [info for info in parse_all_versions_info(version_manifest) if str(info['id']) == version_name]
-    # print(version_info)
-    return version_info[0]
+    def version_details(self, version_name):
+        "dict - some usable info"
 
-def parse_url_to_detailed_version_manifest_url(version_info):
-    return version_info['url']
+        details = {}
 
-def get_detailed_version_manifest(version_manifest, version_name):
-    info = parse_version_info(version_manifest, version_name)
-    detailed_manifest_url = parse_url_to_detailed_version_manifest_url(info)
-    return json_detailed_version_manifest(detailed_manifest_url)
+        short_info = {}
+        try:
+            short_info = self.__find_version_in_manifest(version_name)
+        except IndexError as e:
+            print("given version does not exist!!!!")
+            raise e
 
-def parse_version_download_info(detailed_manifest):
-    return detailed_manifest['downloads']
+        details['version_name'] = short_info['id']
+        details['type'] = short_info['type']
+        details['date'] = datetime.fromisoformat(short_info['releaseTime']).astimezone(timezone.utc)
 
-def parse_server_download(version_download_info):
-    return version_download_info['server']
+        long_info = fetch_detailed_version_manifest(short_info['url'])
 
-def parse_download_url(download_info):
-    return download_info['url']
+        details['assets_version'] = long_info['assetIndex']['id']
+        details['client_sha1'] = long_info['downloads']['client']['sha1']
+        details['client_url'] = long_info['downloads']['client']['url']
+        details['server_sha1'] = long_info['downloads']['server']['sha1']
+        details['server_url'] = long_info['downloads']['server']['url']
 
-def get_download_info(version_manifest, version_name):
-    detailed_manifest = get_detailed_version_manifest(version_manifest, version_name)
-    return parse_version_download_info(detailed_manifest)
+        return details
 
-def get_server_download_info(version_manifest, version_name):
-    download_info = get_download_info(version_manifest, version_name)
-    return parse_server_download(download_info)
+    def __find_version_in_manifest(self, version_name):
+        version_info = [info for info in self.version_manifest['versions'] if str(info['id']) == version_name]
+        return version_info[0] # throws if not found
 
-# moduly
-def list_all_versions(version_manifest):
-    for version_info in version_manifest['versions']:
-        print(version_info['id'])
+# modules
+def list_all_versions(database: VersionInfo):
+    for name in database.all_version_names():
+        print(name)
 
-def print_latest_version_name(version_manifest):
-    print(parse_latest_version_name(version_manifest))
+def latest_version(database: VersionInfo):
+    print('release: {}'.format(database.latest_release_name()))
+    print('snapshot: {}'.format(database.latest_snapshot_name()))
 
-def print_lasetst_server_download_info(version_manifest):
-    version = parse_latest_release_version_name(version_manifest)
-    print("wersja: {}".format(version))
-    print(get_server_download_info(version_manifest, version))
+def quiet_latest_release(database: VersionInfo):
+    print(database.latest_release_name())
 
+def quiet_latest_snapshot(database: VersionInfo):
+    print(database.latest_snapshot_name())
 
-if __name__ == "__main__":    
-    # parser = argparse.ArgumentParser(description='narzedzie automatycznego zarzadzania wersjami serwera mc')
+def latest_server_link(database: VersionInfo):
+    version = database.latest_release_name()
+    details = database.version_details(version)
+    
+    print('version: {}'.format(version))
+    print('type: {}'.format(details['type']))
+    print('download link: {}'.format(details['server_url']))
+    print('sha1: {}'.format(details['server_sha1']))
+    print('release date: {}'.format((details['date'])))
+    print('age: {} ago'.format(datetime.now().astimezone(timezone.utc) - details['date']))
 
-    # parser.add_argument('--list-all', action='store_true', 
-    #     help="wypisz wszystkie mozliwe wersje")
-    # parser.add_argument('--info', action='store', choices=['WERSJA'],
-    #     help="wypisz informacje dotyczace konkretnej wersji")
-    # parser.add_argument('--download', action='store', 
-    #     help="pobierz serwer danej wersji")
-    # parser.add_argument('module', choices=['list-versions', 'download'])
+def useful_info(database: VersionInfo, version):
+    # print(database.version_details(version))
 
-    # parser.parse_args()
+    details = database.version_details(version)
+    for key in details:
+        print('{}: {}'.format(key, details[key]))
+    print('age: {} ago'.format(datetime.now().astimezone(timezone.utc) - details['date']))
 
-    # version_manifest = JSON_version_manifest()
-    # version_name = parse_latest_release_version_name(version_manifest)
-    # last_info = parse_version_info(version_manifest, version_name)
-    # detailed_manifest_url = parse_url_to_detailed_version_manifest_url(version_info)
-    # detailed_manifest = JSON_detailed_version_manifest(detailed_manifest_url)    
+# main
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+    parser = ArgumentParser(description='mojang api helper')
 
-    # debug
-    print( # dla werstwy serwisu
-        # parse_latest_version_name(version_manifest)
-        # parse_latest_release_version_name(version_manifest)
-        # parse_all_versions_info(version_manifest)
-        # parse_version_info(version_manifest, version_name)
-        # parse_url_to_detailed_version_manifest_url(last_info)
-        # get_detailed_version_manifest(version_manifest, version_name)
-        # get_download_info(version_manifest, version_name)
-        # get_server_download_info(version_manifest, version_name)
-    )
-    # dla warstwy modulow
-    # list_all_versions(version_manifest)
-    # print_latest_version_name(version_manifest)
+    parser.add_argument('-L', '--list_all', action='store_true', 
+        help='print all versions')
+    parser.add_argument('-r', '--release', action='store_true',
+        help='last release - quiet')
+    parser.add_argument('-s', '--snapshot', action='store_true',
+        help='last snapshot - quiet')
+    parser.add_argument('-l', '--last_versions', action='store_true',
+        help='print last versions of release and snapshot releases')
+    parser.add_argument('-u', '--version_info',
+        help='print some info for a given version')
+    
 
-    version_manifest = json_version_manifest()
-    print_lasetst_server_download_info(version_manifest)
+    args = parser.parse_args()
 
+    database = VersionInfo()
 
-# TODO
-# pobieranie ze sprawdzaniem sha1 czy server w folderze jest aktualny
-# argumenty polecenia
+    if args.list_all:
+        list_all_versions(database)
+    elif args.release:
+        quiet_latest_release(database)
+    elif args.snapshot:
+        quiet_latest_snapshot(database)
+    elif args.last_versions:
+        latest_version(database)
+    elif args.version_info:
+        useful_info(database, args.version_info)    
+    else:
+        latest_server_link(database)
+
